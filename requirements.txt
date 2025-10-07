@@ -1,0 +1,17 @@
+numpy==1.26.4
+pandas==2.2.2
+pydantic-settings==2.8.1
+matplotlib==3.10.6
+langchain==0.3.19
+langchain-core==0.3.64
+langchain-community==0.3.18
+langchain-openai==0.3.6
+langchain-ollama==0.3.3
+langchain-mcp-adapters==0.1.7
+langgraph==0.2.60
+gradio==5.46.1
+fastapi==0.115.12
+gunicorn==22.0.0
+markdown-pdf==1.4
+duckduckgo_search==7.4.5
+joblib==1.5.2

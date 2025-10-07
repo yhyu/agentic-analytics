@@ -1,0 +1,5 @@
+
+# error code
+ERR_DONE = 0
+ERR_QUESTION = 1
+ERR_INVALID = 2

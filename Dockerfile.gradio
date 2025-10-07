@@ -1,0 +1,14 @@
+FROM python:3.12.4-slim
+
+RUN mkdir -p /agent/app
+COPY --chown=agent:agent  ./app/core /agent/app/core
+COPY --chown=agent:agent  ./app/gradio /agent/app/gradio
+COPY --chown=agent:agent  ./download_sample_db.py /agent/
+COPY --chown=agent:agent  ./requirements.txt /agent/
+COPY --chown=agent:agent  ./run_agent.sh /agent/
+
+WORKDIR /agent
+RUN chmod a+x run_agent.sh
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+CMD ["./run_agent.sh"]

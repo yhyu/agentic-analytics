@@ -1,0 +1,9 @@
+services:
+  agentic-analytics:
+    container_name: agentic-analytics
+    image: agentic-analytics:latest
+    ports:
+      - 8000:8000
+    env_file:
+      - path: openai.env
+      - path: common.env
