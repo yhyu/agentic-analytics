@@ -21,7 +21,8 @@ python -m venv agentic_analytics
 source agentic_analytics/bin/activate
 ```
 
-Setup environment variables. For example.
+Setup environment variables.  
+Environment variables are divided into two env files (of course you can put them together), LLM service-related variables (*.env*) and others (*common.env*). For example, for OpenAI, copy openai.env to .env and modify your api key and models.
 ```bash
 cp openai.env .env
 ```
