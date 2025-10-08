@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, Dict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,14 +53,15 @@ td {
 }"""
 
     # TODO: implement db/table selection by hybrid search
-    DATABASE: str
-    DB_SCHEMA: str
+    DATABASE: Optional[str] = None
+    DB_SCHEMA: Optional[str] = None
 
     # Use MCP
-    DB_SEARCH_MCP_NAME: str  # = "db_searcher"
-    DB_SEARCH_MCP_URL: str   # = "http://127.0.0.1:8001/mcp"
-    DB_SEARCH_MCP_TOOL: str  # = "get_database"
-    DB_SEARCH_MCP_TRANSPORT: str  # = "streamable_http"
+    DB_SEARCH_MCP_NAME: Optional[str] = None        # "db_searcher"
+    DB_SEARCH_MCP_URL: Optional[str] = None         # "http://127.0.0.1:8001/mcp"
+    DB_SEARCH_MCP_TOOL: Optional[str] = None        # "get_database"
+    DB_SEARCH_MCP_TRANSPORT: Optional[str] = None   # "streamable_http"
+    DB_SEARCH_MCP_HEADER: Optional[Dict[str, str]] = None # {"Authorization": "Bearer YOUR_TOKEN"}
 
     # log level
     LOG_LEVEL: str = 'INFO'

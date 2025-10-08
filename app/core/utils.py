@@ -49,6 +49,7 @@ class DBInfo:
                     settings.DB_SEARCH_MCP_NAME: {
                         "transport": settings.DB_SEARCH_MCP_TRANSPORT,
                         "url": settings.DB_SEARCH_MCP_URL,
+                        "headers": settings.DB_SEARCH_MCP_HEADER,
                     }
                 }
             )

@@ -15,13 +15,13 @@ Agentic Analytics is a project that leverages Large Language Models (LLMs) to em
 - You can replace with your dataset by setting **DATABASE** and **DB_SCHEMA** environment variables, or use **MCP** (refer to [sample MCP server](https://github.com/yhyu/agentic-analytics/blob/main/app/mcp_srv/db_searcher.py).)
   
 ## Quick start
-Create python virtual environment
+Create python virtual environment.
 ```bash
 python -m venv agentic_analytics
 source agentic_analytics/bin/activate
 ```
 
-Setup environment variables. For example,
+Setup environment variables. For example.
 ```bash
 cp openai.env .env
 ```
