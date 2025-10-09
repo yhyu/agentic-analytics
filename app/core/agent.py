@@ -1,14 +1,7 @@
-
-import warnings
-warnings.filterwarnings("ignore")
-
-import csv
-import io
 import json
 import operator
 import os
 import subprocess
-import sqlite3
 import sys
 import tempfile
 import threading
@@ -16,6 +9,9 @@ import traceback
 from datetime import datetime
 from typing import TypedDict, Annotated, Any, Literal, Union, List
 from uuid import uuid4 as guid
+
+import warnings
+warnings.filterwarnings("ignore")
 
 from langchain.tools import tool
 from langchain.pydantic_v1 import BaseModel, Field
@@ -30,6 +26,7 @@ from markdown_pdf import MarkdownPdf, Section
 
 import app.core.utils as utils
 from app.core.constant import *
+from app.core.db_access import DBAccess, DBLookUp
 from app.core.llm import LLM
 from app.core.setting import settings, logger
 
@@ -61,6 +58,7 @@ class ActionConfig(TypedDict):
     task_id: Annotated[int, "the is of the action."]
     purpose: Annotated[str, "the purpose of the action"]
     action_type: Annotated[Literal['sql', 'python', "web search"], "Type of action."]
+    database: Annotated[str, "sqlite database file name, or mysql and PostgreSQL database name."]
     code: Annotated[str, "either sql query script, or python code, or web search query"]
     dependencies: Annotated[list[int], "list of dependent action's task_id"]
 
@@ -116,7 +114,8 @@ class Agent:
         self.human_tools = [Agent.human_assistant]
         self.memory = MemorySaver()
         self.graph = self.build_graph(self.memory)
-        self.get_database = utils.DBInfo().get_database
+        self.db_access = DBAccess(**settings.DB_CONNECTION)
+        self.get_database = DBLookUp().get_database
 
     @staticmethod
     @tool('human-assistant-tool', args_schema=AskHumanInput, return_direct=True)
@@ -124,30 +123,6 @@ class Agent:
         """Human assistant answer any question"""
         response = interrupt({'question': question})
         return response['answer']
-
-    @staticmethod
-    def query_database(sql: str):
-        """Retrieve Warehouse and Retail sales data from database"""
-        try:
-            con = sqlite3.connect('db/warehouse_and_retail_sales.sqlite')
-            con.row_factory = sqlite3.Row
-            cur = con.cursor()
-            cur.execute(sql)
-            rows = cur.fetchall()
-            if not rows:
-                return 'Error: no results found.'
-            with io.StringIO() as f:
-                w = csv.writer(f, lineterminator='\n')
-                w.writerow(rows[0].keys())
-                w.writerows(rows)
-                f.seek(0)
-                result = f.read()
-
-            if len(result) > 40*1024:
-                return 'Error: result is more than 4K tokens. Try to aggregate of limit the size of result to make it shoter.'
-            return result
-        except Exception as e:
-            return f"Error query database: {str(e)}"
 
     @staticmethod
     def save_pdf(filename: str, content: str):
@@ -158,6 +133,9 @@ class Agent:
         pdf.add_section(Section(content, toc=False), user_css=settings.REPORT_PDF_CSS)
         pdf.save(file_path)
         return file_path
+
+    def query_database(self, database: str, sql: str):
+        return self.db_access.query_database(database, sql)
 
     # Agent Nodes
 
@@ -189,7 +167,12 @@ class Agent:
         system_prompt = prompts['system']
         if state.get("background"):
             system_prompt += f"\nHere are some background:{state["background"]}"
-        db_schemas = '\n---\n'.join([f"database: {db}\ntable schema:\n{tbl}" for db, tbl in db_tables])
+        db_schemas = '\n---\n'.join(
+            [
+                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
+                for db, tbl in db_tables
+            ]
+        )
         result = await self.llm_cot.bind_tools(self.human_tools).ainvoke(
             [SystemMessage(content=system_prompt)] +
             state["messages"][state.get("start_index", 0):] +
@@ -204,7 +187,11 @@ class Agent:
         system_prompt = prompts['system']
         if state.get("background"):
             system_prompt += f"\nHere are some background:{state["background"]}"
-        db_schemas = '\n---\n'.join([f"database: {db}\ntable schema:\n{tbl}" for db, tbl in db_tables])
+        db_schemas = '\n---\n'.join(
+            [
+                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
+                for db, tbl in db_tables]
+        )
         return {
             "plans": [
                 (await self.llm_cot.ainvoke(
@@ -222,7 +209,11 @@ class Agent:
         system_prompt = prompts['system']
         if len(state["reports"]) > 0:
             system_prompt += f"\nHere is the previous report:\n{state["reports"][-1]}"
-        db_schemas = '\n---\n'.join([f"database: {db}\ntable schema:\n{tbl}" for db, tbl in db_tables])
+        db_schemas = '\n---\n'.join(
+            [
+                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
+                for db, tbl in db_tables]
+        )
         user_prompt = prompts['user'].format(db_schemas=db_schemas, plan=state["plans"][-1])
         if state.get('finished_actions'):
             user_prompt += (f"Based on above analytics plan and following finished tasks, if there is unfinished tasks, extract the tasks, "
@@ -257,7 +248,12 @@ class Agent:
         if state.get('error', '') == '':
             return {}
         db_tables = await self.get_database(state['intent'])
-        db_schemas = '\n---\n'.join([f"database: {db}\ntable schema:\n{tbl}" for db, tbl in db_tables])
+        db_schemas = '\n---\n'.join(
+            [
+                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
+                for db, tbl in db_tables
+            ]
+        )
         code_types = {
             'python': 'python code',
             'sql': 'sql script',
@@ -378,9 +374,9 @@ class Agent:
         )
         return {'shell_cmd': None}  # reset command
 
-    def _run_sql(self, state: ActionState):
+    async def _run_sql(self, state: ActionState):
         try:
-            result = Agent.query_database(state['action']['code'])
+            result = self.query_database(state['action'].get('database'), state['action']['code'])
             if result.startswith('Error'):
                 return {'error': result}
             return {

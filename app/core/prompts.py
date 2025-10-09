@@ -39,10 +39,12 @@ PROMPTS = {
     },
     "action_exactor": {
         "system": "You are a senior data scientist, good at extracting actions from data analytics plan.",
-        "user": "Based on the following analytics plan and database tables, extract a list of actions. "
+        "user": "Based on the following analytics plan and database tables, extract a list of actions, "
+                "including 'sql' to collect data, 'python' to create visualization chats, and 'web search' to search information from internet. "
                 "If the user only wants to enhance a previous report, extract only the parts that are different.\n"
-                "Notes: The action code, including sql scripts and python code, MUST be complete and runnable. "
+                "Notes: The action code, including sql scripts if python code, MUST be complete and runnable. "
                 "Notes: DO NOT use multiple SQL statements. Always break down a task with multiple SQL statements into several tasks with a single SQL statement in each task.\n"
+                "Notes: DO NOT include sql query in python code. If the python code needs data from database, you have to split the data collection task in another 'sql' task.\n"
                 "Notes: DO NOT extract tasks if there are unfinished dependencies.\n"
                 "Notes: The size of collected data by sql query MUST NOT over 4K tokens.\n"
                 "Notes: While pareparing python code to generate visualizations/charts, you MUST print the saved charts file name and chart title "
