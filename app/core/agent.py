@@ -10,11 +10,8 @@ from datetime import datetime
 from typing import TypedDict, Annotated, Any, Literal, Union, List
 from uuid import uuid4 as guid
 
-import warnings
-warnings.filterwarnings("ignore")
-
 from langchain.tools import tool
-from langchain.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from langchain_core.messages import SystemMessage, HumanMessage, AnyMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.constants import Send
@@ -29,6 +26,7 @@ from app.core.constant import *
 from app.core.db_access import DBAccess, DBLookUp
 from app.core.llm import LLM
 from app.core.setting import settings, logger
+from app.core.utils import Singleton
 
 CLEAN = sys.intern('_clean_')
 
@@ -104,7 +102,7 @@ class AskHumanInput(BaseModel):
     question: str = Field(description='A question to ask the human assistant.')
 
 
-class Agent:
+class Agent(metaclass=Singleton):
 
     def __init__(self, llms):
         self._lock = threading.Lock()

@@ -1,6 +1,3 @@
-import warnings
-warnings.filterwarnings("ignore")
-
 from typing import Any, Callable
 
 from langchain_community.llms import VLLMOpenAI
@@ -89,6 +86,7 @@ class LLM:
             openai_api_key="EMPTY",
             openai_api_base=base_url,
         )
+
 
 LLM_Factory.reg_creator('openai', LLM.init_openai_llm)
 LLM_Factory.reg_creator('ollama', LLM.init_ollama_llm)
