@@ -1,24 +1,25 @@
 import csv
 import io
 import mysql.connector
-import os
 import psycopg2
 import sqlite3
-from pathlib import Path
-from joblib import Memory
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from pydantic import BaseModel, Field
 
 from app.core.setting import settings, logger
+from app.core.utils import Singleton
 
 
-cache_loc = os.environ.get(
-    'DEEP_ANALYTICS_CACHE_LOC',
-    default=os.path.join(Path.home(), 'cache_DeepAnalytics')
-)
-MemoryCache = Memory(location=cache_loc, verbose=0)
+class DatabaseSchema(BaseModel):
+    database: str = Field(description="database name")
+    table_schema: str = Field(description="table schema")
 
 
-class DBAccess:
+class DatabaseSearchResult(BaseModel):
+    search_result: list[DatabaseSchema] = Field(description="list of database schema")
+
+
+class Database(metaclass=Singleton):
     def __init__(self, **kw):
         if kw and 'type' in kw:
             self.db_type = kw.pop('type')
@@ -34,8 +35,8 @@ class DBAccess:
             self.connector = sqlite3
             self.conn_args = {}
 
-    def query_database(self, database: str, sql: str):
-        """Retrieve Warehouse and Retail sales data from database"""
+    def query_database(self, database: str, sql: str) -> str:
+        """Execute SQL script to retrieve data from database"""
         db_conn = None
         cursor = None
         try:
@@ -71,10 +72,48 @@ class DBAccess:
                 db_conn.close()
 
 
+class DBAccess:
+    def __init__(self, **kw):
+        self.mcp_query_database = None
+        self.db = Database(**kw)
+        self.db_type = self.db.db_type
+
+    async def _init_mcp(self):
+        if not settings.DB_ACCESS_MCP_URL or self.mcp_query_database:
+            return
+
+        if settings.DB_ACCESS_MCP_URL:
+            client = MultiServerMCPClient(
+                {
+                    settings.DB_ACCESS_MCP_NAME: {
+                        "transport": settings.DB_ACCESS_MCP_TRANSPORT,
+                        "url": settings.DB_ACCESS_MCP_URL,
+                        "headers": settings.DB_ACCESS_MCP_HEADER,
+                    }
+                }
+            )
+            try:
+                mcp_tools = await client.get_tools()
+                mcp_db_query_tool = [t for t in mcp_tools if t.name == settings.DB_ACCESS_MCP_TOOL]
+                if mcp_db_query_tool:
+                    self.mcp_query_database = (lambda **kw: mcp_db_query_tool[0].ainvoke(kw))
+                    logger.info('mcp tool is initialized.')
+            except Exception:
+                pass
+
+    async def query_database(self, database: str, sql: str) -> str:
+        # Use MCP
+        await self._init_mcp()
+        if self.mcp_query_database:
+            return await self.mcp_query_database(database=database, sql=sql)
+
+        # local call
+        return self.db.query_database(database, sql)
+
+
 class DBLookUp:
     def __init__(self):
         self.mcp_get_database = None
-        self.get_database = MemoryCache.cache(self._get_database)
 
     async def _init_mcp(self):
         if not settings.DB_SEARCH_MCP_URL or self.mcp_get_database:
@@ -88,7 +127,7 @@ class DBLookUp:
                         "url": settings.DB_SEARCH_MCP_URL,
                         "headers": settings.DB_SEARCH_MCP_HEADER,
                     }
-                }
+                },
             )
             try:
                 mcp_tools = await client.get_tools()
@@ -99,14 +138,19 @@ class DBLookUp:
             except Exception:
                 pass
 
-    async def _get_database(self, hint: str = None, topN: int = 1) -> list[tuple[str, str]]:
+    async def get_database(self, hint: str = None, topN: int = 1) -> list[tuple[str, str]]:
         # Use MCP
         await self._init_mcp()
         if self.mcp_get_database:
-            return await self.mcp_get_database(hint=hint, topN=topN)
+            json_result = await self.mcp_get_database(hint=hint, topN=topN)
+            return DatabaseSearchResult.model_validate_json(json_result)
 
         # TODO: leverage semantic seach + BM25 + reranker
-        return [(
-            settings.DATABASE,
-            settings.DB_SCHEMA
-        )]
+        return DatabaseSearchResult(
+            search_result=[
+                DatabaseSchema(
+                    database=settings.DATABASE,
+                    table_schema=settings.DB_SCHEMA
+                )
+            ]
+        )

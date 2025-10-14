@@ -132,8 +132,8 @@ class Agent(metaclass=Singleton):
         pdf.save(file_path)
         return file_path
 
-    def query_database(self, database: str, sql: str):
-        return self.db_access.query_database(database, sql)
+    async def query_database(self, database: str, sql: str) -> str:
+        return await self.db_access.query_database(database, sql)
 
     # Agent Nodes
 
@@ -167,8 +167,8 @@ class Agent(metaclass=Singleton):
             system_prompt += f"\nHere are some background:{state["background"]}"
         db_schemas = '\n---\n'.join(
             [
-                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
-                for db, tbl in db_tables
+                f"db type: {self.db_access.db_type}\ndatabase: {db_tbl.database}\ntable schema:\n{db_tbl.table_schema}"
+                for db_tbl in db_tables.search_result
             ]
         )
         result = await self.llm_cot.bind_tools(self.human_tools).ainvoke(
@@ -187,8 +187,9 @@ class Agent(metaclass=Singleton):
             system_prompt += f"\nHere are some background:{state["background"]}"
         db_schemas = '\n---\n'.join(
             [
-                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
-                for db, tbl in db_tables]
+                f"db type: {self.db_access.db_type}\ndatabase: {db_tbl.database}\ntable schema:\n{db_tbl.table_schema}"
+                for db_tbl in db_tables.search_result
+            ]
         )
         return {
             "plans": [
@@ -209,10 +210,11 @@ class Agent(metaclass=Singleton):
             system_prompt += f"\nHere is the previous report:\n{state["reports"][-1]}"
         db_schemas = '\n---\n'.join(
             [
-                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
-                for db, tbl in db_tables]
+                f"db type: {self.db_access.db_type}\ndatabase: {db_tbl.database}\ntable schema:\n{db_tbl.table_schema}"
+                for db_tbl in db_tables.search_result
+            ]
         )
-        user_prompt = prompts['user'].format(db_schemas=db_schemas, plan=state["plans"][-1])
+        user_prompt = prompts['user'].format(db_schemas=db_schemas, plan=state["plans"][-1], resolution=settings.CHART_RESOLUTION)
         if state.get('finished_actions'):
             user_prompt += (f"Based on above analytics plan and following finished tasks, if there is unfinished tasks, extract the tasks, "
                             f"otherwise, output empty actions.\n"
@@ -248,8 +250,8 @@ class Agent(metaclass=Singleton):
         db_tables = await self.get_database(state['intent'])
         db_schemas = '\n---\n'.join(
             [
-                f"db type: {self.db_access.db_type}\ndatabase: {db}\ntable schema:\n{tbl}"
-                for db, tbl in db_tables
+                f"db type: {self.db_access.db_type}\ndatabase: {db_tbl.database}\ntable schema:\n{db_tbl.table_schema}"
+                for db_tbl in db_tables.search_result
             ]
         )
         code_types = {
@@ -374,7 +376,7 @@ class Agent(metaclass=Singleton):
 
     async def _run_sql(self, state: ActionState):
         try:
-            result = self.query_database(state['action'].get('database'), state['action']['code'])
+            result = await self.query_database(state['action'].get('database'), state['action']['code'])
             if result.startswith('Error'):
                 return {'error': result}
             return {

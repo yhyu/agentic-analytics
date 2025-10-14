@@ -1,4 +1,4 @@
-from threading import Lock
+from threading import RLock
 from typing import Any, Dict
 
 from duckduckgo_search import DDGS
@@ -6,7 +6,7 @@ from duckduckgo_search import DDGS
 
 class Singleton(type):
     _instances: Dict = {}
-    _lock: Lock = Lock()
+    _lock: RLock = RLock()
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         with self._lock:

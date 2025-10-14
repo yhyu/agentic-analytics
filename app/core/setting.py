@@ -52,6 +52,9 @@ td {
     font-size: 8pt;
 }"""
 
+    # chart resolution in DPI
+    CHART_RESOLUTION: int = 150
+
     # Database access
     # DB connection dict:
     # mysql: {"type": "mysql", "host": "ip address or host name", "user": "user_name", "password": "user_password", "port": 3306}
@@ -59,13 +62,21 @@ td {
     # sqlite: None
     DB_CONNECTION: Dict[str, Any] = {}
 
+    # DB search
     # TODO: implement db/table selection by hybrid search
     DATABASE: Optional[str] = None
     DB_SCHEMA: Optional[str] = None
 
-    # Use MCP
-    DB_SEARCH_MCP_NAME: Optional[str] = None        # "db_searcher"
-    DB_SEARCH_MCP_URL: Optional[str] = None         # "http://127.0.0.1:8001/mcp"
+    # Use MCP for DB access
+    DB_ACCESS_MCP_NAME: Optional[str] = None        # "db_manager"
+    DB_ACCESS_MCP_URL: Optional[str] = None         # "http://127.0.0.1:8101/mcp"
+    DB_ACCESS_MCP_TOOL: Optional[str] = None        # "query_database"
+    DB_ACCESS_MCP_TRANSPORT: Optional[str] = None   # "streamable_http"
+    DB_ACCESS_MCP_HEADER: Optional[Dict[str, str]] = None  # {"Authorization": "Bearer YOUR_TOKEN"}
+
+    # Use MCP for DB search
+    DB_SEARCH_MCP_NAME: Optional[str] = None        # "db_manager"
+    DB_SEARCH_MCP_URL: Optional[str] = None         # "http://127.0.0.1:8101/mcp"
     DB_SEARCH_MCP_TOOL: Optional[str] = None        # "get_database"
     DB_SEARCH_MCP_TRANSPORT: Optional[str] = None   # "streamable_http"
     DB_SEARCH_MCP_HEADER: Optional[Dict[str, str]] = None  # {"Authorization": "Bearer YOUR_TOKEN"}

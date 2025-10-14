@@ -50,7 +50,8 @@ PROMPTS = {
                 "Notes: DO NOT extract tasks if there are unfinished dependencies.\n"
                 "Notes: The size of collected data by sql query MUST NOT over 4K tokens.\n"
                 "Notes: While pareparing python code to generate visualizations/charts, you MUST print the saved charts file name and chart title "
-                "to help enhance report. The visualizations/charts MUST be saved in \"charts\" folder. DO NOT print out any output, except the saved charts file name and chart title.\n"
+                "to help enhance report. Use matplotlib for plotting. The visualizations/charts MUST add clear title, axis labels, and legend if needed. "
+                "Besides, the chart MUST be saved in \"charts\" folder with dpi={resolution}. DO NOT print out any output, except the saved charts file name and chart title.\n"
                 "Here is related database tables.\n{db_schemas}\n---\n\n"
                 "Here is analytics plan:\n{plan}\n\n"
     },
