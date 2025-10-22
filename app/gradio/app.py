@@ -4,7 +4,8 @@ warnings.filterwarnings("ignore")
 import os
 import gradio as gr
 from datetime import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.agent import Agent
@@ -30,9 +31,28 @@ def stop_gen(states):
 def download_report(content, states):
     if not content:
         return None
-    file_name = f'{states.get('tid', 'unknown_tid')}_{datetime.strftime(datetime.now(), '%Y%m%d%H%M%S')}.pdf'
-    logger.info(f'download_report: {file_name}')
-    return Agent.save_pdf(file_name, content)
+    return agent.save_pdf(states.get('uid'), states.get('tid'), content)
+
+
+def gen_report_links(uid: str, reports: list[tuple[str, str]]) -> list[str]:
+    links = []
+    for r in reports:
+        tid = r[0]
+        base_name = r[1].rstrip('.pdf')
+        elements = base_name.rsplit('_', 1)
+        if len(elements) != 2:
+            continue
+        report_time = datetime.strftime(datetime.strptime(elements[1], '%Y%m%d%H%M%S'), '%Y-%m-%d %H:%M:%S')
+        href = f'document.location.pathname="reports/{uid}/{tid}/{base_name}";'
+        links.append(f"<div><a href='javascript:;' onclick='{href}'>{elements[0]} [{report_time}]</a></div>")
+    return links
+
+
+def sidebar_expand(states):
+    uid = states.get('uid', 'anonym')
+    tid = states.get('tid')
+    session_reports, user_reports = agent.list_reports(uid, tid)
+    return ''.join(gen_report_links(uid, session_reports)), ''.join(gen_report_links(uid, user_reports))
 
 
 async def submit_question(question, history, now: datetime, states: dict):
@@ -70,6 +90,12 @@ with gr.Blocks(
         submit_btn=True,
         stop_btn=True,
     )
+    with gr.Sidebar(open=False) as side_bar:
+        gr.HTML('<h3>Reports</h3>')
+        with gr.Tab('Current Session'):
+            session_content = gr.HTML()
+        with gr.Tab('History'):
+            history_content = gr.HTML()
 
     with gr.Row(equal_height=False):
         with gr.Column():
@@ -122,6 +148,19 @@ with gr.Blocks(
         fn=lambda: gr.update(interactive=False),
         outputs=download_btn,
     )
+    side_bar.expand(
+        fn=sidebar_expand,
+        inputs=states,
+        outputs=[session_content, history_content],
+    )
+
+
+@app.get('/reports/{uid}/{tid}/{filename}')
+async def download_hist_report(uid: str, tid: str, filename: str):
+    target = f'reports/{uid}/{tid}/{filename}.pdf'
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail='File not found')
+    return FileResponse(target, media_type="application/octet-stream", filename=filename)
 
 os.makedirs("charts", exist_ok=True)
 app.mount("/charts", StaticFiles(directory="charts"), name="charts")

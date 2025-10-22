@@ -82,6 +82,10 @@ class ShellCommand(BaseModel):
     shell_cmd: str = Field(description='shell command')
 
 
+class ReportTitle(BaseModel):
+    file_name_prefix: str = Field(description='prefix of the report file name')
+
+
 class AgentState(TypedDict):
     background: str = ''  # compressed history
     start_index: int = 0  # start message index of curent run
@@ -123,13 +127,52 @@ class Agent(metaclass=Singleton):
         return response['answer']
 
     @staticmethod
-    def save_pdf(filename: str, content: str):
-        os.makedirs("reports", exist_ok=True)
-        file_path = os.path.join('reports', filename)
+    def list_reports(uid: str = None, tid: str = None) -> list[str]:
+        if not uid:
+            uid = 'anonym'
+        user_reports = []
+        session_reports = []
+        for dir_path, dirnames, filenames in os.walk(f'reports/{uid}'):
+            for dir in dirnames:
+                reports = [
+                    (dir, r) for r in os.listdir(os.path.join(dir_path, dir))
+                    if os.path.isfile(os.path.join(dir_path, dir, r)) and r.endswith('.pdf')
+                ]
+                if dir == tid:
+                    session_reports = reports
+                else:
+                    user_reports.extend(reports)
+        session_reports.sort(key=lambda item: item[1].rstrip('.pdf').rsplit('_', 1)[-1], reverse=True)
+        user_reports.sort(key=lambda item: item[1].rstrip('.pdf').rsplit('_', 1)[-1], reverse=True)
+
+        return session_reports, user_reports
+
+    def save_pdf(self, uid: str, tid: str, content: str):
+        if not uid:
+            uid = 'anonym'
+        if not tid:
+            tid = 'unknown_tid'
+        os.makedirs(f"reports/{uid}/{tid}", exist_ok=True)
+        session_reports, _ = Agent.list_reports(uid, tid)
+        title = self.llm.with_structured_output(ReportTitle).invoke(
+            [
+                HumanMessage(
+                    f"suggest a file name prefix for the folowing report contents:\n"
+                    f"```markdown\n{content}\n```\n"
+                    f"Notes: file name prefix format MUST be consistent with previous file names in the same session. "
+                    f"If the report is a revision, also mark it as such. "
+                    f"Here are previous file names:\n"
+                    f"{'\n'.join([r[1] for r in session_reports])}"
+                )
+            ]
+        )
+        filename = f'{title.file_name_prefix}_{datetime.strftime(datetime.now(), '%Y%m%d%H%M%S')}.pdf'
+        file_path = os.path.join(f'reports/{uid}/{tid}', filename)
         pdf = MarkdownPdf()
         content = content.replace(settings.HOST_URL, './')
         pdf.add_section(Section(content, toc=False), user_css=settings.REPORT_PDF_CSS)
         pdf.save(file_path)
+        logger.info(f'generated pdf report: {file_path}')
         return file_path
 
     async def query_database(self, database: str, sql: str) -> str:
@@ -360,7 +403,7 @@ class Agent(metaclass=Singleton):
                         'error': '', 'success': True
                     }
                 else:
-                    return {'error': 'output files are not generated.'}
+                    return {'error': 'no generated file name is printer, please print out the generated file name and purpose.'}
         except Exception:
             error = traceback.format_exc()
             return {'error': error}
@@ -547,9 +590,9 @@ class Agent(metaclass=Singleton):
             tid = str(guid().hex)
             config = {"configurable": {"thread_id": tid}, "recursion_limit": recursion_limit}
             messages = {"messages": [HumanMessage(content=f"Current time is {now.strftime('%c')}.\n{command}")]}
-        async for s in self.graph.astream(messages, config, subgraphs=True):
+        async for s in self.graph.astream(messages, config, stream_mode="updates", subgraphs=True):
             logger.info(s)
-            logger.info('next step: ' + ', '.join(self.graph.get_state(config).next))
+            logger.info('next step: ' + ', '.join(self.graph.get_state(config, subgraphs=True).next))
             if self.get_stop_flag(tid):
                 self.set_stop_flag(tid, False)  # reset
                 logger.info('user canceled generation.')
