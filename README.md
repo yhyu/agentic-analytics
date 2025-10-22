@@ -51,7 +51,7 @@ gunicorn app.gradio.app:app -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:800
   ![Make a request](https://github.com/yhyu/agentic-analytics/blob/main/images/main_request.png)
 3. Subsequent request
   ![Subsequent request](https://github.com/yhyu/agentic-analytics/blob/main/images/followup_request.png)
-4. Session and history reports (in theleft sidebar)
+4. Session and history reports (in the left sidebar)
   ![Session and History reports](https://github.com/yhyu/agentic-analytics/blob/main/images/history_reports.png)
 5. Try different LLMs.
    - You can select different LLMs by changing the **LLM_FLASH_MODEL** and **LLM_THINKING_MODEL** environment variables.
