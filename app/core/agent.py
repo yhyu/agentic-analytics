@@ -1,3 +1,4 @@
+import aiosqlite
 import json
 import operator
 import os
@@ -7,17 +8,15 @@ import tempfile
 import threading
 import traceback
 from datetime import datetime
-from typing import TypedDict, Annotated, Any, Literal, Union, List
+from typing import TypedDict, Annotated, Any, Literal, List
 from uuid import uuid4 as guid
 
-from langchain.tools import tool
 from pydantic import BaseModel, Field
 from langchain_core.messages import SystemMessage, HumanMessage, AnyMessage, AIMessage
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.constants import Send
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt, Command
 from markdown_pdf import MarkdownPdf, Section
 
@@ -52,17 +51,17 @@ class ActionCode(BaseModel):
     code: str = Field(description="either sql query script, or python code, or web search query")
 
 
-class ActionConfig(TypedDict):
-    task_id: Annotated[int, "the is of the action."]
-    purpose: Annotated[str, "the purpose of the action"]
-    action_type: Annotated[Literal['sql', 'python', "web search"], "Type of action."]
-    database: Annotated[str, "sqlite database file name, or mysql and PostgreSQL database name."]
-    code: Annotated[str, "either sql query script, or python code, or web search query"]
-    dependencies: Annotated[list[int], "list of dependent action's task_id"]
+class ActionConfig(BaseModel):
+    task_id: int = Field(description="the ID of the action.")
+    purpose: str = Field(description="the purpose of the action")
+    action_type: Literal['sql', 'python', "web search"] = Field(description="Type of action.")
+    database: str = Field(description="sqlite database file name, or mysql and PostgreSQL database name.")
+    code: str = Field(description="either sql query script, or python code, or web search query")
+    dependencies: list[int] = Field(description="list of dependent action's task_id", default=[])
 
 
-class ActionList(TypedDict):
-    actions: Annotated[List[ActionConfig], "list of action"]
+class ActionList(BaseModel):
+    actions: List[ActionConfig] = Field(description="list of action", default=[])
 
 
 class ActionState(TypedDict):
@@ -100,31 +99,29 @@ class AgentState(TypedDict):
     finished_actions: Annotated[List[ActionResult], clean_reducer]
     data: Annotated[list[Any], operator.add]
     invalid_request: str = None
+    recheck_input: bool = False
 
 
-class AskHumanInput(BaseModel):
-    question: str = Field(description='A question to ask the human assistant.')
+class UserIntent(BaseModel):
+    intent: str = Field(description='user intent, if user intent is not clear, you have to ask user questions to figure out user intent.')
+    question: str = Field(description="Ask the user a question if you do not fully understant user's intent.")
+    need_clarify: bool = Field(description='Should you ask more detail for the request so that you can proceed the request?')
 
 
 class Agent(metaclass=Singleton):
 
-    def __init__(self, llms):
+    @classmethod
+    async def create(cls, llms):
+        self = cls()
         self._lock = threading.Lock()
         self._stop_flag = dict()  # {tid: stop_flag}
         self.llm = llms['Flash']
         self.llm_cot = llms['Thinking']  # reasoning model, or llm with CoT
-        self.human_tools = [Agent.human_assistant]
-        self.memory = MemorySaver()
-        self.graph = self.build_graph(self.memory)
+        self.checkpointer = AsyncSqliteSaver(await aiosqlite.connect("db/checkpointer.db"))
+        self.graph = self.build_graph()
         self.db_access = DBAccess(**settings.DB_CONNECTION)
         self.get_database = DBLookUp().get_database
-
-    @staticmethod
-    @tool('human-assistant-tool', args_schema=AskHumanInput, return_direct=True)
-    def human_assistant(question: str):
-        """Human assistant answer any question"""
-        response = interrupt({'question': question})
-        return response['answer']
+        return self
 
     @staticmethod
     def list_reports(uid: str = None, tid: str = None) -> list[str]:
@@ -214,12 +211,21 @@ class Agent(metaclass=Singleton):
                 for db_tbl in db_tables.search_result
             ]
         )
-        result = await self.llm_cot.bind_tools(self.human_tools).ainvoke(
+        result = await self.llm.with_structured_output(UserIntent).ainvoke(
             [SystemMessage(content=system_prompt)] +
             state["messages"][state.get("start_index", 0):] +
             [HumanMessage(content=prompts['user'].format(db_schemas=db_schemas))]
         )
-        return {"messages": [result]}
+        if result.need_clarify and result.question:
+            user_response = interrupt({'question': result.question})
+            return {
+                "messages": [
+                    AIMessage(result.question),
+                    HumanMessage(user_response['answer']),
+                ],
+                "recheck_input": True
+            }
+        return {"messages": [AIMessage(result.intent)], "recheck_input": False}
 
     async def _planner(self, state: AgentState):
         intents = state['messages'][-1].content
@@ -259,23 +265,25 @@ class Agent(metaclass=Singleton):
         )
         user_prompt = prompts['user'].format(db_schemas=db_schemas, plan=state["plans"][-1], resolution=settings.CHART_RESOLUTION)
         if state.get('finished_actions'):
-            user_prompt += (f"Based on above analytics plan and following finished tasks, if there is unfinished tasks, extract the tasks, "
-                            f"otherwise, output empty actions.\n"
-                            f"Here are finished tasks:\n{'\n'.join([json.dumps(a, ensure_ascii=False) for a in state.get('finished_actions')])}"
-                            f"\n\nNotes: DO NOT output redundant tasks, and DO NOT output tasks that are already in the finieshed tasks.")
+            user_prompt += (f"Based on above analytics plan and following finished tasks, if there is unfinished tasks,"
+                            f" extract the tasks, otherwise, output empty actions.\n"
+                            f"Notes: DO NOT output redundant tasks, "
+                            f"and DO NOT output tasks that are already in the finieshed tasks.\n\n"
+                            f"Here are finished tasks:\n"
+                            f"{'\n'.join([json.dumps(a, ensure_ascii=False) for a in state.get('finished_actions')])}")
         response = await self.llm.with_structured_output(ActionList).ainvoke(
             [
                 SystemMessage(content=prompts['system']),
                 HumanMessage(content=user_prompt),
             ]
         )
-        logger.info(f"action_extractor extracted {len(response.get("actions"))} actions in this iteration.")
+        logger.info(f"action_extractor extracted {len(response.actions)} actions in this iteration.")
         # remove tasks that have dependencies
         finished_action_ids = set([a['task_id'] for a in state.get('finished_actions', [])])
         actions = []
-        for a in response.get("actions", []):
+        for a in response.actions:
             pending = False
-            for d in a.get('dependencies', []):
+            for d in a.dependencies:
                 if d not in finished_action_ids:
                     pending = True
                     break
@@ -302,29 +310,31 @@ class Agent(metaclass=Singleton):
             'sql': 'sql script',
             'web search': 'web search'
         }
-        display_code_type = code_types.get(state['action']['action_type'], 'code')
+        action = state['action']
+        display_code_type = code_types.get(action.action_type, 'code')
         prompt = (
             f"You are a senior software engineer and data scientist, good at debug. The {display_code_type} has following error. "
             "Please refine and fixed the error, and output the correct {display_code_type} in the 'code' field.\n"
             "Here is related database tables.\n"
             f"{db_schemas}\n---\n\n"
+            f"purpose: {action.purpose}\n"
         )
-        if 'purpose' in state['action']:
-            prompt += f"purpose: {state['action']['purpose']}\n"
-        if state['action']['action_type'] == 'sql':
-            prompt += f"sql: {state['action']['code']}\n"
-        elif state['action']['action_type'] == 'python':
-            prompt += f"python code: {state['action']['code']}\n"
+        if action.action_type == 'sql':
+            prompt += f"sql: {action.code}\n"
+        elif action.action_type == 'python':
+            prompt += f"python code: {action.code}\n"
         else:
-            prompt += f"web search: {state['action']['code']}\n"
+            prompt += f"web search: {action.code}\n"
         prompt += f"error: {state['error']}"
-        if state['action']['action_type'] == 'python':
+        if action.action_type == 'python':
             prompt += "\nPlease be sure the visualizations/charts are readable, DO NOT clutter it up in a single visualization/chart."
+        elif action.action_type == 'sql':
+            prompt += "\n\n**MOST IMPORTANT**: You can only execute one statement in a 'sql' task, because we use "
+            "`cursor.execute(sql)` python code to execute sql statement, and the code can excute only one sql statement."
         response = await self.llm.with_structured_output(ActionCode).ainvoke(
             [HumanMessage(content=prompt)]
         )
-        action = state['action']
-        action['code'] = response.code
+        action.code = response.code
         return {"action": action}
 
     def _report_writer(self, state: AgentState):
@@ -352,9 +362,10 @@ class Agent(metaclass=Singleton):
         }
 
     def _web_search(self, state: ActionState):
-        if 'code' not in state['action']:
+        action = state['action']
+        if not action.code:
             return {}
-        search_result = utils.web_search(state['action']['code'])
+        search_result = utils.web_search(action.code)
         if search_result.startswith('Error'):
             return {'error': search_result}
         # summarize result
@@ -364,25 +375,26 @@ class Agent(metaclass=Singleton):
                 SystemMessage(content=prompts['system']),
                 HumanMessage(
                     content=prompts['user'].format(
-                        purpose=state['action'].get('purpose', ''), search_results=search_result)
+                        purpose=action.purpose, search_results=search_result)
                 )
             ]
         ).content
         return {
-            'data': [f"*{state['action'].get('purpose', '')}\n{result}"],
+            'data': [f"*{action.purpose}\n{result}"],
             'finished_actions': [{
-                'task_id': state['action'].get('task_id', ''),
-                'purpose': state['action'].get('purpose', ''),
+                'task_id': action.task_id,
+                'purpose': action.purpose,
                 'result': result,
             }],
             'error': '', 'success': True
         }
 
     def _run_pycode(self, state: PyCodeState):
+        action = state['action']
         try:
             with tempfile.TemporaryFile() as f_out, tempfile.TemporaryFile() as f_err:
                 subprocess.run(
-                    ["python3", "-c", 'import warnings\nwarnings.filterwarnings("ignore")\n' + state['action']['code']],
+                    ["python3", "-c", 'import warnings\nwarnings.filterwarnings("ignore")\n' + action.code],
                     stdout=f_out,
                     stderr=f_err,
                 )
@@ -394,10 +406,10 @@ class Agent(metaclass=Singleton):
                     return {'error': error}
                 elif output:
                     return {
-                        'data': [f"*{state['action'].get('purpose', '')}\n{output}"],
+                        'data': [f"*{action.purpose}\n{output}"],
                         'finished_actions': [{
-                            'task_id': state['action'].get('task_id', ''),
-                            'purpose': state['action'].get('purpose', ''),
+                            'task_id': action.task_id,
+                            'purpose': action.purpose,
                             'result': output,
                         }],
                         'error': '', 'success': True
@@ -418,15 +430,16 @@ class Agent(metaclass=Singleton):
         return {'shell_cmd': None}  # reset command
 
     async def _run_sql(self, state: ActionState):
+        action = state['action']
         try:
-            result = await self.query_database(state['action'].get('database'), state['action']['code'])
+            result = await self.query_database(action.database, action.code)
             if result.startswith('Error'):
-                return {'error': result}
+                return {'error': result}  # TODO: need replan in some cases.
             return {
-                'data': [f"*{state['action'].get('purpose', '')}\n{result}"],
+                'data': [f"*{action.purpose}\n{result}"],
                 'finished_actions': [{
-                    'task_id': state['action'].get('task_id', ''),
-                    'purpose': state['action'].get('purpose', ''),
+                    'task_id': action.task_id,
+                    'purpose': action.purpose,
                     'result': result,
                 }],
                 'error': '', 'success': True
@@ -444,7 +457,7 @@ class Agent(metaclass=Singleton):
                 SystemMessage(content=prompts['system']),
                 HumanMessage(
                     content=prompts['user'].format(
-                        python_code=state['action']['code'], error=state.get('error'),
+                        python_code=state['action'].code, error=state.get('error'),
                     ))
             ]
         )
@@ -462,29 +475,12 @@ class Agent(metaclass=Singleton):
     def _data_collection_condition(self, state: ActionState):
         if state.get('success'):
             return 'next'
-        return state['action']['action_type']
-
-    def _my_tools_condition(
-            self,
-            state: Union[list[AnyMessage], dict[str, Any], BaseModel],
-            messages_key: str = "messages",
-    ):
-        if isinstance(state, list):
-            ai_message = state[-1]
-        elif isinstance(state, dict) and (messages := state.get(messages_key, [])):
-            ai_message = messages[-1]
-        elif messages := getattr(state, messages_key, []):
-            ai_message = messages[-1]
-        else:
-            raise ValueError(f"No messages found in input state to tool_edge: {state}")
-        if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
-            return "tools"
-        return "next"
+        return state['action'].action_type
 
     def _continue_data_collection_condition(self, state: AgentState):
         return [Send("data_collector", {"action": a, "intent": state["intents"][-1]}) for a in state["actions"]]
 
-    def build_graph(self, memory):
+    def build_graph(self):
         # run python code subgraph
         pycode_flow = StateGraph(PyCodeState)
         pycode_flow.add_node('run_pycode', self._run_pycode)
@@ -498,7 +494,7 @@ class Agent(metaclass=Singleton):
             {'shell': 'run_shell', 'next': END}
         )
         pycode_flow.set_entry_point('run_pycode')
-        pycode_graph = pycode_flow.compile(checkpointer=memory)
+        pycode_graph = pycode_flow.compile(checkpointer=self.checkpointer)
 
         # Action subgraph
         act_flow = StateGraph(ActionState)
@@ -516,7 +512,7 @@ class Agent(metaclass=Singleton):
             self._data_collection_condition,
             {'next': END, 'sql': 'run_sql', 'python': 'run_code', 'web search': 'web_search'}
         )
-        act_graph = act_flow.compile(checkpointer=memory)
+        act_graph = act_flow.compile(checkpointer=self.checkpointer)
 
         # main graph
         workflow = StateGraph(AgentState)
@@ -528,7 +524,6 @@ class Agent(metaclass=Singleton):
         workflow.add_node('action_distributor', self._action_distributor)
         workflow.add_node('data_collector', act_graph)
         workflow.add_node('report_writer', self._report_writer)
-        workflow.add_node('human_assistant', ToolNode(self.human_tools))
 
         workflow.add_edge(START, 'starter')
         workflow.add_edge('starter', 'topic_validator')
@@ -539,10 +534,9 @@ class Agent(metaclass=Singleton):
         )
         workflow.add_conditional_edges(
             'request_clarifier',
-            self._my_tools_condition,
-            {'tools': 'human_assistant', 'next': 'planner'}
+            lambda state: 'recheck' if state.get('recheck_input') else 'continue',
+            {'continue': 'planner', 'recheck': 'topic_validator'}
         )
-        workflow.add_edge('human_assistant', 'topic_validator')
         workflow.add_edge('planner', 'action_extractor')
         workflow.add_conditional_edges(
             'action_extractor',
@@ -556,7 +550,7 @@ class Agent(metaclass=Singleton):
         )
         workflow.add_edge('data_collector', 'action_extractor')
         workflow.add_edge('report_writer', END)
-        return workflow.compile(checkpointer=memory)
+        return workflow.compile(checkpointer=self.checkpointer)
 
     def set_stop_flag(self, tid: str = None, flag: bool = True) -> bool:
         with self._lock:
@@ -576,13 +570,13 @@ class Agent(metaclass=Singleton):
         response = ""
         if tid:
             config = {"configurable": {"thread_id": tid}, "recursion_limit": recursion_limit}
-            current_state = self.graph.get_state(config)
+            current_state = await self.graph.aget_state(config)
             next_step = current_state.next
             if not next_step:
                 command = f"Current time is {now.strftime('%c')}.\n{command}"
             elif isinstance(next_step, (tuple, list)) and len(next_step) > 0:
                 next_step = next_step[0]
-            if next_step == 'human_assistant':  # next is tool call
+            if next_step == 'request_clarifier':  # next is response to request_clarifier
                 messages = Command(resume={"answer": command})
             else:
                 messages = {"messages": [HumanMessage(content=command)]}
@@ -591,8 +585,9 @@ class Agent(metaclass=Singleton):
             config = {"configurable": {"thread_id": tid}, "recursion_limit": recursion_limit}
             messages = {"messages": [HumanMessage(content=f"Current time is {now.strftime('%c')}.\n{command}")]}
         async for s in self.graph.astream(messages, config, stream_mode="updates", subgraphs=True):
+            current_state = await self.graph.aget_state(config, subgraphs=True)
             logger.info(s)
-            logger.info('next step: ' + ', '.join(self.graph.get_state(config, subgraphs=True).next))
+            logger.info('next step: ' + ', '.join(current_state.next))
             if self.get_stop_flag(tid):
                 self.set_stop_flag(tid, False)  # reset
                 logger.info('user canceled generation.')
@@ -603,7 +598,7 @@ class Agent(metaclass=Singleton):
                 if '__interrupt__' in d:
                     response = d['__interrupt__'][0].value.get('question')
                     break
-        current_state = self.graph.get_state(config)
+        current_state = await self.graph.aget_state(config)
         if current_state.values.get('invalid_request'):
             return tid, current_state.values.get('invalid_request'), ERR_INVALID
         ret_code = ERR_QUESTION

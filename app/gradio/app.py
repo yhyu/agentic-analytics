@@ -1,6 +1,4 @@
-import warnings
-warnings.filterwarnings("ignore")
-
+import asyncio
 import os
 import gradio as gr
 from datetime import datetime
@@ -15,7 +13,7 @@ from app.core.setting import logger
 
 app = FastAPI()
 llms = LLM.get_llms()
-agent = Agent(llms)
+agent = asyncio.run(Agent.create(llms))
 
 
 def new_report(states):

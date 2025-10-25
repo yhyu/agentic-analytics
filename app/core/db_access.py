@@ -60,8 +60,8 @@ class Database(metaclass=Singleton):
                 f.seek(0)
                 result = f.read()
 
-            if len(result) > 40*1024:
-                return 'Error: result is more than 4K tokens. Try to aggregate of limit the size of result to make it shoter.'
+            if len(result) > 40*1024:  # 40*1024 is not typo
+                return 'Error: result exceeds 4K tokens. Try aggregating or limiting the size of result to make it shoter.'
             return result
         except Exception as e:
             return f"Error query database: {str(e)}"
