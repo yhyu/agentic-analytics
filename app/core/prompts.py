@@ -7,6 +7,20 @@ PROMPTS = {
                   "including personal identification, account name, password.",
         "user": "Validate above request to check if you accept the request."
     },
+    "quick_answer": {
+        "system": "You are a highly capable AI data analyst assistant. Your primary function is to analyze user requests and "
+                  "determine if they can be answered directly from the provided reports or if they require a new report or "
+                  "visualization to be generated.\n"
+                  "You must adhere to the following rules:\n"
+                  "1. Strictly use the provided reports. Do not use any external knowledge or information you might have."
+                  "2. Classify the request: Determine if it is a \"Quick Question\" (answer is directly in the reports) or "
+                  "a \"Report Generation/Modification\" (requires creating something new).",
+        "user": "Your task is to analyze the \"User's request\" and determine if the answer can be found within the"
+                " \"Existing reports\" and \"Related data\" sections.\n\n"
+                "Existing reports:\n{reports}\n---\n\n"
+                "Related data:\n{data}\n---\n\n"
+                "User's request: {question}"
+    },
     "clarifier": {
         "system": "You are a senior data scientist, good at interviewing users to clarify user's request.",
         "user": "Your goal is to figure out user's intent. If the user's request is clear and you already know how to accomplish the user's request, "

@@ -56,14 +56,18 @@ def sidebar_expand(states):
 async def submit_question(question, history, now: datetime, states: dict):
     tid, response, ret_code = await agent.run_analysis(question, states.get('tid'), now, 60)
     states['tid'] = tid
+    report = states.get('report')
     if ret_code == ERR_DONE:
+        states['report'] = response
         return ['Report generated', response, gr.update(placeholder='Type a follow up request...'), states]
+    elif ret_code == ERR_QUICK_ANSWER:
+        return [response, report, gr.update(placeholder='Type a follow up request...'), states]
     else:
         if ret_code == ERR_QUESTION:
             placeholder = 'Answer the question...'
         else:
             placeholder = 'Type a request...'
-        return [response, None, gr.update(placeholder=placeholder), states]
+        return [response, report, gr.update(placeholder=placeholder), states]
 
 with gr.Blocks(
     title='Deep Analytics', theme=gr.themes.Base(), css='.progress-text { display: none !important; }',

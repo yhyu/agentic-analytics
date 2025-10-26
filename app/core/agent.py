@@ -41,6 +41,11 @@ class InputValidation(BaseModel):
     accepted: bool = Field(description="Does the request belongs to the topic that you accept.")
 
 
+class QuickAnswer(BaseModel):
+    answer: str = Field(description="Find the answer in the report.")
+    has_answer: bool = Field(description="Is there answer in the report.")
+
+
 class ActionResult(TypedDict):
     task_id: int
     purpose: str
@@ -99,6 +104,7 @@ class AgentState(TypedDict):
     finished_actions: Annotated[List[ActionResult], clean_reducer]
     data: Annotated[list[Any], operator.add]
     invalid_request: str = None
+    gen_report: str = True
     recheck_input: bool = False
 
 
@@ -198,6 +204,30 @@ class Agent(metaclass=Singleton):
         else:
             logger.info(f"user request is not accepted: '{result.description}'")
             return {'invalid_request': result.description}
+
+    # In-session QA
+    # TODO: cross-session QA
+    def quick_answer(self, state: AgentState):
+        reports = state.get('reports')
+        if not reports:
+            return {'gen_report': True}
+        prompts = LLM.Prompts['quick_answer']
+        result = self.llm.with_structured_output(QuickAnswer).invoke(
+            [
+                SystemMessage(prompts['system']),
+                HumanMessage(
+                    prompts['user'].format(
+                        reports='\n---\n'.join(reports),
+                        data='\n---\n'.join(state.get('data', [])),
+                        question=state["messages"][-1].content
+                    )
+                )
+            ]
+        )
+        if not result.has_answer:
+            return {'gen_report': True}
+        else:
+            return {'gen_report': False, 'messages': [AIMessage(result.answer)]}
 
     async def _request_clarifier(self, state: AgentState):
         db_tables = await self.get_database(state['messages'][state.get("start_index", 0)].content)
@@ -518,6 +548,7 @@ class Agent(metaclass=Singleton):
         workflow = StateGraph(AgentState)
         workflow.add_node('starter', self._starter)
         workflow.add_node('topic_validator', self._topic_validator)
+        workflow.add_node('quick_answer', self.quick_answer)
         workflow.add_node('request_clarifier', self._request_clarifier)
         workflow.add_node('planner', self._planner)
         workflow.add_node('action_extractor', self._action_extractor)
@@ -530,6 +561,11 @@ class Agent(metaclass=Singleton):
         workflow.add_conditional_edges(
             'topic_validator',
             lambda state: 'end' if state.get('invalid_request') else 'continue',
+            {'end': END, 'continue': 'quick_answer'}
+        )
+        workflow.add_conditional_edges(
+            'quick_answer',
+            lambda state: 'continue' if state.get('gen_report') else 'end',
             {'end': END, 'continue': 'request_clarifier'}
         )
         workflow.add_conditional_edges(
@@ -604,7 +640,12 @@ class Agent(metaclass=Singleton):
         ret_code = ERR_QUESTION
         done = not current_state.next
         if done:
-            response = current_state.values['reports'][-1]
-            ret_code = ERR_DONE
-            logger.info(f"report generated (tid: {tid})")
+            if not current_state.values.get('gen_report'):
+                response = current_state.values['messages'][-1].content
+                ret_code = ERR_QUICK_ANSWER
+                logger.info(f"Quick answer: {response}")
+            else:
+                response = current_state.values['reports'][-1]
+                logger.info(f"report generated (tid: {tid})")
+                ret_code = ERR_DONE
         return tid, response, ret_code
