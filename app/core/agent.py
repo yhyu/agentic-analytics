@@ -557,15 +557,15 @@ class Agent(metaclass=Singleton):
         workflow.add_node('report_writer', self._report_writer)
 
         workflow.add_edge(START, 'starter')
-        workflow.add_edge('starter', 'topic_validator')
+        workflow.add_edge('starter', 'quick_answer')
+        workflow.add_conditional_edges(
+            'quick_answer',
+            lambda state: 'gen_report' if state.get('gen_report') else 'end',
+            {'end': END, 'gen_report': 'topic_validator'}
+        )
         workflow.add_conditional_edges(
             'topic_validator',
             lambda state: 'end' if state.get('invalid_request') else 'continue',
-            {'end': END, 'continue': 'quick_answer'}
-        )
-        workflow.add_conditional_edges(
-            'quick_answer',
-            lambda state: 'continue' if state.get('gen_report') else 'end',
             {'end': END, 'continue': 'request_clarifier'}
         )
         workflow.add_conditional_edges(
