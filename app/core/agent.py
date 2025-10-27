@@ -69,9 +69,15 @@ class ActionList(BaseModel):
     actions: List[ActionConfig] = Field(description="list of action", default=[])
 
 
+class ActionData(TypedDict):
+    task_id: int
+    action_type: Annotated[str, Literal['sql', 'python', "web search"]]
+    data: str
+
+
 class ActionState(TypedDict):
     action: ActionConfig
-    data: Annotated[list[Any], operator.add]
+    data: Annotated[list[ActionData], operator.add]
     finished_actions: Annotated[List[ActionResult], clean_reducer]
     intent: str
     error: str
@@ -102,7 +108,7 @@ class AgentState(TypedDict):
     plans: Annotated[list[str], operator.add]
     actions: ActionList
     finished_actions: Annotated[List[ActionResult], clean_reducer]
-    data: Annotated[list[Any], operator.add]
+    data: Annotated[list[ActionData], operator.add]
     invalid_request: str = None
     gen_report: str = True
     recheck_input: bool = False
@@ -211,6 +217,10 @@ class Agent(metaclass=Singleton):
         reports = state.get('reports')
         if not reports:
             return {'gen_report': True}
+        session_data = []
+        for d in state.get('data', []):
+            if d.get('action_type') == 'sql':  # only need sql dataset
+                session_data.append(d['data'])
         prompts = LLM.Prompts['quick_answer']
         result = self.llm.with_structured_output(QuickAnswer).invoke(
             [
@@ -218,7 +228,7 @@ class Agent(metaclass=Singleton):
                 HumanMessage(
                     prompts['user'].format(
                         reports='\n---\n'.join(reports),
-                        data='\n---\n'.join(state.get('data', [])),
+                        data='\n---\n'.join(session_data),
                         question=state["messages"][-1].content
                     )
                 )
@@ -372,6 +382,7 @@ class Agent(metaclass=Singleton):
         system_prompt = prompts['system']
         if len(state["reports"]) > 0:
             system_prompt += f"\nHere is the previous report:\n{state["reports"][-1]}"
+        action_data = [d['data'] for d in state['data'][state.get("data_index", 0):] if 'data' in d]
         ai_message = self.llm_cot.invoke(
             [
                 SystemMessage(content=system_prompt),
@@ -379,7 +390,7 @@ class Agent(metaclass=Singleton):
                     content=prompts['user'].format(
                         user_intents=state['intents'][-1],
                         plan=state['plans'][-1],
-                        data='\n\n'.join(state['data'][state.get("data_index", 0):]), endpoint=settings.HOST_URL)
+                        data='\n\n'.join(action_data), endpoint=settings.HOST_URL)
                 ),
             ]
         )
@@ -410,7 +421,11 @@ class Agent(metaclass=Singleton):
             ]
         ).content
         return {
-            'data': [f"*{action.purpose}\n{result}"],
+            'data': [{
+                'task_id': action.task_id,
+                'action_type': action.action_type,
+                'data': f"*{action.purpose}\n{result}"
+            }],
             'finished_actions': [{
                 'task_id': action.task_id,
                 'purpose': action.purpose,
@@ -436,7 +451,11 @@ class Agent(metaclass=Singleton):
                     return {'error': error}
                 elif output:
                     return {
-                        'data': [f"*{action.purpose}\n{output}"],
+                        'data': [{
+                            'task_id': action.task_id,
+                            'action_type': action.action_type,
+                            'data': f"*{action.purpose}\n{output}"
+                        }],
                         'finished_actions': [{
                             'task_id': action.task_id,
                             'purpose': action.purpose,
@@ -459,14 +478,22 @@ class Agent(metaclass=Singleton):
         )
         return {'shell_cmd': None}  # reset command
 
+    # TODO: need replan in some cases that are not about sql syntax error.
+    # e.g., result set too long.
+    # TODO: save the result set into file system.
+    # Pycode read the files, report writer also read all files before generate report.
     async def _run_sql(self, state: ActionState):
         action = state['action']
         try:
             result = await self.query_database(action.database, action.code)
             if result.startswith('Error'):
-                return {'error': result}  # TODO: need replan in some cases.
+                return {'error': result}
             return {
-                'data': [f"*{action.purpose}\n{result}"],
+                'data': [{
+                    'task_id': action.task_id,
+                    'action_type': action.action_type,
+                    'data': f"*{action.purpose}\n{result}"
+                }],
                 'finished_actions': [{
                     'task_id': action.task_id,
                     'purpose': action.purpose,
