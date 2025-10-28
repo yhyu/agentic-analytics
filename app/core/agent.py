@@ -8,11 +8,15 @@ import tempfile
 import threading
 import traceback
 from datetime import datetime
-from typing import TypedDict, Annotated, Any, Literal, List
+from typing import TypedDict, Annotated, Any, Literal, List, Optional
 from uuid import uuid4 as guid
 
 from pydantic import BaseModel, Field
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import SystemMessage, HumanMessage, AnyMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.constants import Send
 from langgraph.graph import StateGraph, START, END
@@ -63,6 +67,10 @@ class ActionConfig(BaseModel):
     database: str = Field(description="sqlite database file name, or mysql and PostgreSQL database name.")
     code: str = Field(description="either sql query script, or python code, or web search query")
     dependencies: list[int] = Field(description="list of dependent action's task_id", default=[])
+    file_name_prefix: Optional[str] = Field(
+        description="file name prefix based on above purpose, MUST be meaningful",
+        default=None
+    )
 
 
 class ActionList(BaseModel):
@@ -82,6 +90,7 @@ class ActionState(TypedDict):
     intent: str
     error: str
     success: bool
+    tid: str
 
 
 class PyCodeState(ActionState):
@@ -92,8 +101,11 @@ class ShellCommand(BaseModel):
     shell_cmd: str = Field(description='shell command')
 
 
-class ReportTitle(BaseModel):
-    file_name_prefix: str = Field(description='prefix of the report file name')
+class ReportOutput(BaseModel):
+    report_markdown_content: str = Field(description="report content in Markdown format")
+    file_name_prefix: str = Field(
+        description="report file name prefix based on above report_markdown content, MUST be meaningful"
+    )
 
 
 class AgentState(TypedDict):
@@ -102,7 +114,7 @@ class AgentState(TypedDict):
     data_index: int = 0   # start data index of curent run
     requests: Annotated[list[str], operator.add]  # original requests
     intents: Annotated[list[str], operator.add]   # real intents
-    reports: Annotated[list[str], operator.add]
+    reports: Annotated[list[ReportOutput], operator.add]
     messages: Annotated[list[AnyMessage], add_messages]
     done: bool = False
     plans: Annotated[list[str], operator.add]
@@ -115,7 +127,9 @@ class AgentState(TypedDict):
 
 
 class UserIntent(BaseModel):
-    intent: str = Field(description='user intent, if user intent is not clear, you have to ask user questions to figure out user intent.')
+    intent: str = Field(
+        description='user intent, if user intent is not clear, you have to ask user questions to figure out user intent.'
+    )
     question: str = Field(description="Ask the user a question if you do not fully understant user's intent.")
     need_clarify: bool = Field(description='Should you ask more detail for the request so that you can proceed the request?')
 
@@ -156,26 +170,45 @@ class Agent(metaclass=Singleton):
 
         return session_reports, user_reports
 
-    def save_pdf(self, uid: str, tid: str, content: str):
+    @tool('read-data-file', description="read file content", parse_docstring=True)
+    @staticmethod
+    def read_file(
+        file_path: Annotated[str, "Path to the file you want to read"]
+    ) -> str:
+        """Read file content.
+
+        Args:
+            file_path: Path to the file to read
+
+        Returns:
+            file content, or error message if file not found
+        """
+        try:
+            with open(file_path, encoding='utf-8') as f:
+                content = f.read()
+            return content
+        except FileNotFoundError as e:
+            return e.strerror
+
+    async def save_pdf(self, uid: str, tid: str, content: str):
         if not uid:
             uid = 'anonym'
         if not tid:
             tid = 'unknown_tid'
         os.makedirs(f"reports/{uid}/{tid}", exist_ok=True)
         session_reports, _ = Agent.list_reports(uid, tid)
-        title = self.llm.with_structured_output(ReportTitle).invoke(
-            [
-                HumanMessage(
-                    f"suggest a file name prefix for the folowing report contents:\n"
-                    f"```markdown\n{content}\n```\n"
-                    f"Notes: file name prefix format MUST be consistent with previous file names in the same session. "
-                    f"If the report is a revision, also mark it as such. "
-                    f"Here are previous file names:\n"
-                    f"{'\n'.join([r[1] for r in session_reports])}"
-                )
-            ]
+        config = {"configurable": {"thread_id": tid}}
+        state = await self.graph.aget_state(config)
+        report = state.values['reports'][-1]
+        file_name_prefix = report.file_name_prefix
+        revision = 0
+        for r in session_reports:
+            if r[1].startswith(file_name_prefix):
+                revision += 1
+        filename = (
+            f"{file_name_prefix}{f'_rev{revision}' if revision > 0 else ''}_"
+            f"{datetime.strftime(datetime.now(), '%Y%m%d%H%M%S')}.pdf"
         )
-        filename = f'{title.file_name_prefix}_{datetime.strftime(datetime.now(), '%Y%m%d%H%M%S')}.pdf'
         file_path = os.path.join(f'reports/{uid}/{tid}', filename)
         pdf = MarkdownPdf()
         content = content.replace(settings.HOST_URL, './')
@@ -189,18 +222,18 @@ class Agent(metaclass=Singleton):
 
     # Agent Nodes
 
-    def _starter(self, state: AgentState):
+    async def _starter(self, state: AgentState):
         return {
             "requests": [state['messages'][-1].content],
             "start_index": len(state['messages']) - 1,
         }
 
-    def _topic_validator(self, state: AgentState):
+    async def _topic_validator(self, state: AgentState):
         prompts = LLM.Prompts['topic_validator']
         system_prompt = prompts['system'].format(topics=settings.ACCEPTED_TOPICS)
         if state.get("background"):
             system_prompt += f"\nHere are some background:{state["background"]}"
-        result = self.llm.with_structured_output(InputValidation).invoke(
+        result = await self.llm.with_structured_output(InputValidation).ainvoke(
             [SystemMessage(content=system_prompt)] +
             state["messages"][state.get("start_index", 0):] +
             [HumanMessage(content=prompts['user'])]
@@ -213,7 +246,7 @@ class Agent(metaclass=Singleton):
 
     # In-session QA
     # TODO: cross-session QA
-    def quick_answer(self, state: AgentState):
+    async def quick_answer(self, state: AgentState):
         reports = state.get('reports')
         if not reports:
             return {'gen_report': True}
@@ -222,22 +255,26 @@ class Agent(metaclass=Singleton):
             if d.get('action_type') == 'sql':  # only need sql dataset
                 session_data.append(d['data'])
         prompts = LLM.Prompts['quick_answer']
-        result = self.llm.with_structured_output(QuickAnswer).invoke(
-            [
-                SystemMessage(prompts['system']),
-                HumanMessage(
-                    prompts['user'].format(
-                        reports='\n---\n'.join(reports),
-                        data='\n---\n'.join(session_data),
-                        question=state["messages"][-1].content
-                    )
-                )
-            ]
+        quicker = create_agent(
+            model=self.llm,
+            checkpointer=self.checkpointer,
+            system_prompt=prompts['system'],
+            tools=[Agent.read_file],
+            response_format=ToolStrategy(QuickAnswer)
         )
-        if not result.has_answer:
+        result = await quicker.ainvoke({
+            'messages': HumanMessage(
+                prompts['user'].format(
+                    reports='\n---\n'.join([r.report_markdown_content for r in reports]),
+                    data='\n---\n'.join(session_data),
+                    question=state["messages"][-1].content
+                )
+            )
+        })
+        if not result['structured_response'].has_answer:
             return {'gen_report': True}
         else:
-            return {'gen_report': False, 'messages': [AIMessage(result.answer)]}
+            return {'gen_report': False, 'messages': [AIMessage(result['structured_response'].answer)]}
 
     async def _request_clarifier(self, state: AgentState):
         db_tables = await self.get_database(state['messages'][state.get("start_index", 0)].content)
@@ -291,7 +328,7 @@ class Agent(metaclass=Singleton):
             "finished_actions": [CLEAN]
         }
 
-    async def _action_extractor(self, state: AgentState):
+    async def _action_extractor(self, state: AgentState, config: RunnableConfig):
         db_tables = await self.get_database(state['intents'][-1])
         prompts = LLM.Prompts['action_exactor']
         system_prompt = prompts['system']
@@ -303,7 +340,12 @@ class Agent(metaclass=Singleton):
                 for db_tbl in db_tables.search_result
             ]
         )
-        user_prompt = prompts['user'].format(db_schemas=db_schemas, plan=state["plans"][-1], resolution=settings.CHART_RESOLUTION)
+        user_prompt = prompts['user'].format(
+            db_schemas=db_schemas,
+            plan=state["plans"][-1],
+            resolution=settings.CHART_RESOLUTION,
+            tid=config['configurable'].get('thread_id', 'unknown_tid')
+        )
         if state.get('finished_actions'):
             user_prompt += (f"Based on above analytics plan and following finished tasks, if there is unfinished tasks,"
                             f" extract the tasks, otherwise, output empty actions.\n"
@@ -332,7 +374,7 @@ class Agent(metaclass=Singleton):
         logger.info(f"action_extractor extracted {len(actions)} actions that have no dependencies in this iteration.")
         return {"actions": actions}
 
-    def _action_distributor(self, state: AgentState):
+    async def _action_distributor(self, state: AgentState):
         return {}
 
     async def _data_collector(self, state: ActionState):
@@ -377,32 +419,43 @@ class Agent(metaclass=Singleton):
         action.code = response.code
         return {"action": action}
 
-    def _report_writer(self, state: AgentState):
+    async def _report_writer(self, state: AgentState, config: RunnableConfig):
         prompts = LLM.Prompts['reporter']
         system_prompt = prompts['system']
         if len(state["reports"]) > 0:
             system_prompt += f"\nHere is the previous report:\n{state["reports"][-1]}"
         action_data = [d['data'] for d in state['data'][state.get("data_index", 0):] if 'data' in d]
-        ai_message = self.llm_cot.invoke(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(
-                    content=prompts['user'].format(
-                        user_intents=state['intents'][-1],
-                        plan=state['plans'][-1],
-                        data='\n\n'.join(action_data), endpoint=settings.HOST_URL)
-                ),
-            ]
+        reporter = create_agent(
+            model=self.llm_cot,
+            checkpointer=self.checkpointer,
+            tools=[Agent.read_file],
+            system_prompt=system_prompt,
+            response_format=ToolStrategy(ReportOutput),
         )
-        background = f"User Intents:\n{'\n'.join(state["intents"])}\n---\nPrevious Report:\n{ai_message.content}\n---\n"
+        ai_message = await reporter.ainvoke({
+            'messages': HumanMessage(
+                prompts['user'].format(
+                    user_intents=state['intents'][-1],
+                    plan=state['plans'][-1],
+                    data='\n\n'.join(action_data),
+                    tid=config['configurable'].get('thread_id', 'unknown_tid'),
+                    endpoint=settings.HOST_URL
+                )
+            )
+        })
+        report = ai_message['structured_response']
+        background = (
+            f"User Intents:\n{'\n'.join(state["intents"])}\n---\n"
+            f"Previous Report:\n{report.report_markdown_content}\n---\n"
+        )
         return {
             "messages": [AIMessage(content='Report generated')],
-            "reports": [ai_message.content],
+            "reports": [report],
             "background": background,
             "data_index": len(state['data']) - 1,
         }
 
-    def _web_search(self, state: ActionState):
+    async def _web_search(self, state: ActionState):
         action = state['action']
         if not action.code:
             return {}
@@ -434,7 +487,7 @@ class Agent(metaclass=Singleton):
             'error': '', 'success': True
         }
 
-    def _run_pycode(self, state: PyCodeState):
+    async def _run_pycode(self, state: PyCodeState):
         action = state['action']
         try:
             with tempfile.TemporaryFile() as f_out, tempfile.TemporaryFile() as f_err:
@@ -469,7 +522,7 @@ class Agent(metaclass=Singleton):
             error = traceback.format_exc()
             return {'error': error}
 
-    def _run_shell(self, state: PyCodeState):
+    async def _run_shell(self, state: PyCodeState):
         subprocess.run(
             state['shell_cmd'],
             shell=True,
@@ -480,24 +533,27 @@ class Agent(metaclass=Singleton):
 
     # TODO: need replan in some cases that are not about sql syntax error.
     # e.g., result set too long.
-    # TODO: save the result set into file system.
-    # Pycode read the files, report writer also read all files before generate report.
-    async def _run_sql(self, state: ActionState):
+    async def _run_sql(self, state: ActionState, config: RunnableConfig):
         action = state['action']
         try:
             result = await self.query_database(action.database, action.code)
             if result.startswith('Error'):
                 return {'error': result}
+            file_dir = f"data/{config['configurable'].get('thread_id', 'unknown_tid')}"
+            file_path = f"{file_dir}/{action.task_id}_{action.file_name_prefix}.csv"
+            os.makedirs(file_dir, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(result)
             return {
                 'data': [{
                     'task_id': action.task_id,
                     'action_type': action.action_type,
-                    'data': f"*{action.purpose}\n{result}"
+                    'data': f"*{action.purpose}\ndata header: {result.split('\n', 1)[0]}\ndata file: {file_path}"
                 }],
                 'finished_actions': [{
                     'task_id': action.task_id,
                     'purpose': action.purpose,
-                    'result': result,
+                    'result': f"data header: {result.split('\n', 1)[0]}\ndata file: {file_path}",
                 }],
                 'error': '', 'success': True
             }
@@ -505,11 +561,11 @@ class Agent(metaclass=Singleton):
             error = traceback.format_exc()
             return {'error': error}
 
-    def _pycode_debuger(self, state: PyCodeState):
+    async def _pycode_debuger(self, state: PyCodeState):
         if state.get('success'):
             return {}
         prompts = LLM.Prompts['pycode_debuger']
-        result = self.llm.with_structured_output(ShellCommand).invoke(
+        result = await self.llm.with_structured_output(ShellCommand).ainvoke(
             [
                 SystemMessage(content=prompts['system']),
                 HumanMessage(
@@ -672,7 +728,7 @@ class Agent(metaclass=Singleton):
                 ret_code = ERR_QUICK_ANSWER
                 logger.info(f"Quick answer: {response}")
             else:
-                response = current_state.values['reports'][-1]
+                response = current_state.values['reports'][-1].report_markdown_content
                 logger.info(f"report generated (tid: {tid})")
                 ret_code = ERR_DONE
         return tid, response, ret_code

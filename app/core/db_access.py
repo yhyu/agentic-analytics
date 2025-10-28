@@ -48,6 +48,8 @@ class Database(metaclass=Singleton):
             cursor.execute(sql)
             rows = cursor.fetchall()
             if not rows:
+                if cursor.description:
+                    return ','.join([h[0] for h in cursor.description])
                 return 'Error: no results found.'
             with io.StringIO() as f:
                 w = csv.writer(f, lineterminator='\n')

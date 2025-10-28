@@ -26,10 +26,10 @@ def stop_gen(states):
     agent.set_stop_flag(states.get('tid'))
 
 
-def download_report(content, states):
+async def download_report(content, states):
     if not content:
         return None
-    return agent.save_pdf(states.get('uid'), states.get('tid'), content)
+    return await agent.save_pdf(states.get('uid'), states.get('tid'), content)
 
 
 def gen_report_links(uid: str, reports: list[tuple[str, str]]) -> list[str]:
