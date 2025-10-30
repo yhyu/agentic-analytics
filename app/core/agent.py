@@ -1,4 +1,5 @@
 import aiosqlite
+import asyncio
 import json
 import operator
 import os
@@ -46,7 +47,7 @@ class InputValidation(BaseModel):
 
 
 class QuickAnswer(BaseModel):
-    answer: str = Field(description="Find the answer in the report.")
+    answer: str = Field(description="Find the answer in the report or database for the quick question.")
     has_answer: bool = Field(description="Is there answer in the report.")
 
 
@@ -136,6 +137,9 @@ class UserIntent(BaseModel):
 
 class Agent(metaclass=Singleton):
 
+    db_access = DBAccess(**settings.DB_CONNECTION)
+    get_database = DBLookUp().get_database
+
     @classmethod
     async def create(cls, llms):
         self = cls()
@@ -145,8 +149,6 @@ class Agent(metaclass=Singleton):
         self.llm_cot = llms['Thinking']  # reasoning model, or llm with CoT
         self.checkpointer = AsyncSqliteSaver(await aiosqlite.connect("db/checkpointer.db"))
         self.graph = self.build_graph()
-        self.db_access = DBAccess(**settings.DB_CONNECTION)
-        self.get_database = DBLookUp().get_database
         return self
 
     @staticmethod
@@ -220,6 +222,20 @@ class Agent(metaclass=Singleton):
     async def query_database(self, database: str, sql: str) -> str:
         return await self.db_access.query_database(database, sql)
 
+    @tool('query-database-tool', description="retrieve structed data from database", parse_docstring=True)
+    @staticmethod
+    def query_database_tool(database: str, sql: str) -> str:
+        """Retrieve structed data from database using single sql statement.
+
+        Args:
+            database: database name or database file path
+            sql: a single SQL query statement, only support SELECT sataements.
+
+        Returns:
+            retult dataset in csv format, or error message if fail to query
+        """
+        return asyncio.run(Agent.db_access.query_database(database, sql))
+
     # Agent Nodes
 
     async def _starter(self, state: AgentState):
@@ -247,9 +263,14 @@ class Agent(metaclass=Singleton):
     # In-session QA
     # TODO: cross-session QA
     async def quick_answer(self, state: AgentState):
-        reports = state.get('reports')
-        if not reports:
-            return {'gen_report': True}
+        db_tables = await Agent.get_database(state['messages'][state.get("start_index", 0)].content)
+        db_schemas = '\n---\n'.join(
+            [
+                f"db type: {self.db_access.db_type}\ndatabase: {db_tbl.database}\ntable schema:\n{db_tbl.table_schema}"
+                for db_tbl in db_tables.search_result
+            ]
+        )
+        reports = state.get('reports', [])
         session_data = []
         for d in state.get('data', []):
             if d.get('action_type') == 'sql':  # only need sql dataset
@@ -259,7 +280,7 @@ class Agent(metaclass=Singleton):
             model=self.llm,
             checkpointer=self.checkpointer,
             system_prompt=prompts['system'],
-            tools=[Agent.read_file],
+            tools=[Agent.read_file, Agent.query_database_tool],
             response_format=ToolStrategy(QuickAnswer)
         )
         result = await quicker.ainvoke({
@@ -267,6 +288,7 @@ class Agent(metaclass=Singleton):
                 prompts['user'].format(
                     reports='\n---\n'.join([r.report_markdown_content for r in reports]),
                     data='\n---\n'.join(session_data),
+                    db_schemas=db_schemas,
                     question=state["messages"][-1].content
                 )
             )
@@ -277,7 +299,7 @@ class Agent(metaclass=Singleton):
             return {'gen_report': False, 'messages': [AIMessage(result['structured_response'].answer)]}
 
     async def _request_clarifier(self, state: AgentState):
-        db_tables = await self.get_database(state['messages'][state.get("start_index", 0)].content)
+        db_tables = await Agent.get_database(state['messages'][state.get("start_index", 0)].content)
         prompts = LLM.Prompts['clarifier']
         system_prompt = prompts['system']
         if state.get("background"):
@@ -306,7 +328,7 @@ class Agent(metaclass=Singleton):
 
     async def _planner(self, state: AgentState):
         intents = state['messages'][-1].content
-        db_tables = await self.get_database(intents)
+        db_tables = await Agent.get_database(intents)
         prompts = LLM.Prompts['planner']
         system_prompt = prompts['system']
         if state.get("background"):
@@ -329,7 +351,7 @@ class Agent(metaclass=Singleton):
         }
 
     async def _action_extractor(self, state: AgentState, config: RunnableConfig):
-        db_tables = await self.get_database(state['intents'][-1])
+        db_tables = await Agent.get_database(state['intents'][-1])
         prompts = LLM.Prompts['action_exactor']
         system_prompt = prompts['system']
         if len(state["reports"]) > 0:
@@ -380,7 +402,7 @@ class Agent(metaclass=Singleton):
     async def _data_collector(self, state: ActionState):
         if state.get('error', '') == '':
             return {}
-        db_tables = await self.get_database(state['intent'])
+        db_tables = await Agent.get_database(state['intent'])
         db_schemas = '\n---\n'.join(
             [
                 f"db type: {self.db_access.db_type}\ndatabase: {db_tbl.database}\ntable schema:\n{db_tbl.table_schema}"
@@ -640,12 +662,7 @@ class Agent(metaclass=Singleton):
         workflow.add_node('report_writer', self._report_writer)
 
         workflow.add_edge(START, 'starter')
-        workflow.add_edge('starter', 'quick_answer')
-        workflow.add_conditional_edges(
-            'quick_answer',
-            lambda state: 'gen_report' if state.get('gen_report') else 'end',
-            {'end': END, 'gen_report': 'topic_validator'}
-        )
+        workflow.add_edge('starter', 'topic_validator')
         workflow.add_conditional_edges(
             'topic_validator',
             lambda state: 'end' if state.get('invalid_request') else 'continue',
@@ -654,7 +671,12 @@ class Agent(metaclass=Singleton):
         workflow.add_conditional_edges(
             'request_clarifier',
             lambda state: 'recheck' if state.get('recheck_input') else 'continue',
-            {'continue': 'planner', 'recheck': 'topic_validator'}
+            {'continue': 'quick_answer', 'recheck': 'topic_validator'}
+        )
+        workflow.add_conditional_edges(
+            'quick_answer',
+            lambda state: 'gen_report' if state.get('gen_report') else 'end',
+            {'end': END, 'gen_report': 'planner'}
         )
         workflow.add_edge('planner', 'action_extractor')
         workflow.add_conditional_edges(

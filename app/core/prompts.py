@@ -11,16 +11,21 @@ PROMPTS = {
     },
     "quick_answer": {
         "system": "You are a highly capable AI data analyst assistant. Your primary function is to analyze user requests and "
-                  "determine if they can be answered directly from the provided reports or if they require a new report or "
-                  "visualization to be generated.\n"
+                  "determine if they can be answered directly from the provided reports and/or database, "
+                  "or if they require a new report or visualization to be generated.\n"
                   "You must adhere to the following rules:\n"
-                  "1. Strictly use the provided reports. Do not use any external knowledge or information you might have."
-                  "2. Classify the request: Determine if it is a \"Quick Question\" (answer is directly in the reports) or "
-                  "a \"Report Generation/Modification\" (requires creating something new).",
+                  "1. Classify the request: Determine if it is a \"Quick Question\" (answer is directly in the reports "
+                  "or query from database) or a \"Report Generation/Modification\" (requires creating something new, "
+                  "in whhich case, DO NOT query the database or read csv file.)\n"
+                  "2. Strictly use the provided reports or query from database. Do not use other external knowledge "
+                  "or information you might have.\n"
+                  "3. If you determine it's a \"Quick Question\", you MUST output the result in the \"answer\" field.",
         "user": "Your task is to analyze the \"User's request\" and determine if the answer can be found within the"
-                " \"Existing reports\" and \"Related data\" sections.\n\n"
+                " \"Existing reports\", \"Related data\", and \"Related database tables\" sections.\n\n"
+                "Related database tables (use 'query-database-tool' to retrieve data only if NOT requests new report "
+                "generation or update report):\n{db_schemas}\n---\n\n"
                 "Existing reports:\n{reports}\n---\n\n"
-                "Related data (use 'read-data-file' tool to read csv file):\n{data}\n---\n\n"
+                "Related data (use 'read-data-file' tool to read csv file if necessary):\n{data}\n---\n\n"
                 "User's request: {question}"
     },
     "clarifier": {
